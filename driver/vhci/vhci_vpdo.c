@@ -116,6 +116,7 @@ vhci_QueryDeviceCaps_vpdo(pusbip_vpdo_dev_t vpdo, PIRP Irp)
 	// Set the capabilities.
 	//
 	if (deviceCapabilities->Version != 1 || deviceCapabilities->Size < sizeof(DEVICE_CAPABILITIES)) {
+		DBGW(DBG_PNP, "Invalid deviceCapabilities\n");
 		return STATUS_UNSUCCESSFUL;
 	}
 
@@ -189,8 +190,8 @@ vhci_QueryDeviceCaps_vpdo(pusbip_vpdo_dev_t vpdo, PIRP Irp)
 	// whenever the device is surprise removed.
 	deviceCapabilities->SurpriseRemovalOK = TRUE;
 
-	// We don't support system-wide unique IDs.
-	deviceCapabilities->UniqueID = FALSE;
+	// If a custom instance id is used, assume that it is system-wide unique */
+	deviceCapabilities->UniqueID = (vpdo->winstid != NULL) ? TRUE: FALSE;
 
 	// Specify whether the Device Manager should suppress all
 	// installation pop-ups except required pop-ups such as
@@ -231,11 +232,16 @@ setup_vpdo_inst_id(pusbip_vpdo_dev_t vpdo, PIRP irp)
 {
 	PWCHAR	id_inst;
 
-	id_inst = ExAllocatePoolWithTag(PagedPool, 5 * sizeof(wchar_t), USBIP_VHCI_POOL_TAG);
+	id_inst = ExAllocatePoolWithTag(PagedPool, (MAX_VHCI_INSTANCE_ID + 1) * sizeof(wchar_t), USBIP_VHCI_POOL_TAG);
 	if (id_inst == NULL) {
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
-	RtlStringCchPrintfW(id_inst, 5, L"%04hx", vpdo->port);
+
+	if (vpdo->winstid != NULL)
+		RtlStringCchCopyW(id_inst, MAX_VHCI_INSTANCE_ID + 1, vpdo->winstid);
+	else
+		RtlStringCchPrintfW(id_inst, 5, L"%04hx", vpdo->port);
+
 	irp->IoStatus.Information = (ULONG_PTR)id_inst;
 	return STATUS_SUCCESS;
 }
@@ -523,7 +529,7 @@ GetUSBDIVersion(IN PVOID context, IN OUT PUSBD_VERSION_INFORMATION inf, IN OUT P
 	DBGI(DBG_GENERAL, "GetUSBDIVersion called\n");
 
 	*HcdCapabilities = 0;
-	inf->USBDI_Version=0x500; /* Windows XP */
+	inf->USBDI_Version=0x600; /* Windows 8 */
 	inf->Supported_USB_Version=0x200; /* USB 2.0 */
 }
 
@@ -614,6 +620,7 @@ vhci_pnp_vpdo(PDEVICE_OBJECT devobj, PIRP Irp, PIO_STACK_LOCATION IrpStack, pusb
 		status = IoRegisterDeviceInterface(devobj, &GUID_DEVINTERFACE_USB_DEVICE, NULL, &vpdo->usb_dev_interface);
 		if (status == STATUS_SUCCESS)
 			IoSetDeviceInterfaceState(&vpdo->usb_dev_interface, TRUE);
+		DBGI(DBG_GENERAL, "Device started: %s\n", dbg_ntstatus(status));
 		break;
 	case IRP_MN_STOP_DEVICE:
 		// Here we shut down the device and give up and unmap any resources

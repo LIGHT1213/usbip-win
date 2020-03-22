@@ -104,7 +104,6 @@ static void
 remove_cancelled_urbr(pusbip_vpdo_dev_t vpdo, PIRP irp)
 {
 	struct urb_req	*urbr;
-	KIRQL	oldirql = irp->CancelIrql;
 
 	KeAcquireSpinLockAtDpcLevel(&vpdo->lock_urbr);
 
@@ -121,7 +120,7 @@ remove_cancelled_urbr(pusbip_vpdo_dev_t vpdo, PIRP irp)
 		DBGW(DBG_URB, "no matching urbr\n");
 	}
 
-	KeReleaseSpinLock(&vpdo->lock_urbr, oldirql);
+	KeReleaseSpinLockFromDpcLevel(&vpdo->lock_urbr);
 
 	if (urbr != NULL) {
 		submit_urbr_unlink(vpdo, urbr->seq_num);
@@ -173,6 +172,38 @@ free_urbr(struct urb_req *urbr)
 	ExFreeToNPagedLookasideList(&g_lookaside, urbr);
 }
 
+BOOLEAN
+is_port_urbr(struct urb_req *urbr, unsigned char epaddr)
+{
+	PIRP	irp = urbr->irp;
+	PURB	urb;
+	PIO_STACK_LOCATION	irpstack;
+	USBD_PIPE_HANDLE	hPipe;
+
+	if (irp == NULL)
+		return FALSE;
+
+	irpstack = IoGetCurrentIrpStackLocation(irp);
+	urb = irpstack->Parameters.Others.Argument1;
+	if (urb == NULL)
+		return FALSE;
+
+	switch (urb->UrbHeader.Function) {
+	case URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER:
+		hPipe = urb->UrbBulkOrInterruptTransfer.PipeHandle;
+		break;
+	case URB_FUNCTION_ISOCH_TRANSFER:
+		hPipe = urb->UrbIsochronousTransfer.PipeHandle;
+		break;
+	default:
+		return FALSE;
+	}
+
+	if (PIPE2ADDR(hPipe) == epaddr)
+		return TRUE;
+	return FALSE;
+}
+
 NTSTATUS
 submit_urbr(pusbip_vpdo_dev_t vpdo, struct urb_req *urbr)
 {
@@ -217,12 +248,20 @@ submit_urbr(pusbip_vpdo_dev_t vpdo, struct urb_req *urbr)
 		}
 
 		InsertTailList(&vpdo->head_urbr, &urbr->list_all);
+
+		read_irp = vpdo->pending_read_irp;
 		vpdo->pending_read_irp = NULL;
 		KeReleaseSpinLock(&vpdo->lock_urbr, oldirql);
 
-		read_irp->IoStatus.Status = STATUS_SUCCESS;
-		IoCompleteRequest(read_irp, IO_NO_INCREMENT);
-		status = STATUS_PENDING;
+		if (read_irp) {
+			read_irp->IoStatus.Status = STATUS_SUCCESS;
+			IoCompleteRequest(read_irp, IO_NO_INCREMENT);
+			status = STATUS_PENDING;
+		}
+		else {
+			DBGI(DBG_URB, "submit_urbr: read irp was cancelled\n");
+			status = STATUS_INVALID_PARAMETER;
+		}
 	}
 	else {
 		vpdo->urbr_sent_partial = NULL;
